@@ -1,48 +1,38 @@
+from abc import ABC
+from abc import abstractmethod
+from enum import Enum
+from pathlib import Path
+from robot.api.deco import keyword
+from robot.api.deco import library
+from robot.libraries.BuiltIn import BuiltIn  # type: ignore
+from RPA.helpers import import_by_name
+from RPA.helpers import required_env
+from RPA.Robocorp.utils import find_files
+from RPA.Robocorp.utils import is_json_equal
+from RPA.Robocorp.utils import json_dumps
+from RPA.Robocorp.utils import JSONType
+from RPA.Robocorp.utils import resolve_path
+from RPA.Robocorp.utils import truncate
+from RPA.RobotLogListener import deprecation
+from shutil import copy2
+from threading import Event
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Type
+from typing import Union
 import copy
-import email
 import fnmatch
 import json
 import logging
 import os
-from abc import ABC, abstractmethod
-from enum import Enum
-from pathlib import Path
-from shutil import copy2
-from threading import Event
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-
-import yaml
-from robot.api.deco import keyword, library
-from robot.libraries.BuiltIn import BuiltIn
-
-from RPA.core.helpers import import_by_name, required_env
-from RPA.core.logger import deprecation
-from RPA.core.notebook import notebook_print
-from RPA.FileSystem import FileSystem
-from RPA.Robocorp.utils import (
-    JSONType,
-    Requests,
-    get_dot_value,
-    is_json_equal,
-    json_dumps,
-    resolve_path,
-    set_dot_value,
-    truncate,
-    url_join,
-)
 
 
 UNDEFINED = object()  # Undefined default value
 ENCODING = "utf-8"
-
-_STRINGS_TYPE = Union[str, Tuple[str, ...]]
-AUTO_PARSE_EMAIL_TYPE = Optional[Dict[_STRINGS_TYPE, _STRINGS_TYPE]]
-AUTO_PARSE_EMAIL_DEFAULT = {
-    # Source payload keys or file names -> destination payload keys with the parsed
-    # e-mail content.
-    ("email.text", "__mail.html"): ("email.body", "parsedEmail.Body"),
-    "rawEmail": "parsedEmail",
-}
 
 
 class State(Enum):
@@ -73,8 +63,8 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     def release_input(
-        self, item_id: str, state: State, exception: Optional[dict] = None
-    ):
+        self, item_id: str, state: State, exception: Optional[Dict[Any, Any]] = None
+    ) -> None:
         """Release the lastly retrieved input work item and set state."""
         raise NotImplementedError
 
@@ -89,7 +79,7 @@ class BaseAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def save_payload(self, item_id: str, payload: JSONType):
+    def save_payload(self, item_id: str, payload: JSONType) -> None:
         """Save JSON payload to work item."""
         raise NotImplementedError
 
@@ -104,255 +94,16 @@ class BaseAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_file(self, item_id: str, name: str, *, original_name: str, content: bytes):
+    def add_file(
+        self, item_id: str, name: str, *, original_name: str, content: bytes
+    ) -> None:
         """Attach file to work item."""
         raise NotImplementedError
 
     @abstractmethod
-    def remove_file(self, item_id: str, name: str):
+    def remove_file(self, item_id: str, name: str) -> None:
         """Remove attached file from work item."""
         raise NotImplementedError
-
-
-class RobocorpAdapter(BaseAdapter):
-    """Adapter for saving/loading work items from Robocorp Control Room.
-
-    Required environment variables:
-
-    * RC_API_WORKITEM_HOST:     Work item API hostname
-    * RC_API_WORKITEM_TOKEN:    Work item API access token
-
-    * RC_API_PROCESS_HOST:      Process API hostname
-    * RC_API_PROCESS_TOKEN:     Process API access token
-
-    * RC_WORKSPACE_ID:          Control room workspace ID
-    * RC_PROCESS_ID:            Control room process ID
-    * RC_PROCESS_RUN_ID:        Control room process run ID
-    * RC_ROBOT_RUN_ID:          Control room robot run ID
-
-    * RC_WORKITEM_ID:           Control room work item ID (input)
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # IDs identifying the current robot run and its input.
-        self._workspace_id = required_env("RC_WORKSPACE_ID")
-        self._process_run_id = required_env("RC_PROCESS_RUN_ID")
-        self._step_run_id = required_env("RC_ACTIVITY_RUN_ID")
-        self._initial_item_id: Optional[str] = required_env("RC_WORKITEM_ID")
-
-        self._workitem_requests = self._process_requests = None
-        self._init_workitem_requests()
-        self._init_process_requests()
-
-    def _init_workitem_requests(self):
-        # Endpoint for old work items API.
-        workitem_host = required_env("RC_API_WORKITEM_HOST")
-        workitem_token = required_env("RC_API_WORKITEM_TOKEN")
-        route_prefix = (
-            url_join(
-                workitem_host, "json-v1", "workspaces", self._workspace_id, "workitems"
-            )
-            + "/"
-        )
-        default_headers = {
-            "Authorization": f"Bearer {workitem_token}",
-            "Content-Type": "application/json",
-        }
-        logging.info("Work item API route prefix: %s", route_prefix)
-        self._workitem_requests = Requests(
-            route_prefix, default_headers=default_headers
-        )
-
-    def _init_process_requests(self):
-        # Endpoint for the new process API.
-        process_host = required_env("RC_API_PROCESS_HOST")
-        process_token = required_env("RC_API_PROCESS_TOKEN")
-        process_id = required_env("RC_PROCESS_ID")
-        route_prefix = (
-            url_join(
-                process_host,
-                "process-v1",
-                "workspaces",
-                self._workspace_id,
-                "processes",
-                process_id,
-            )
-            + "/"
-        )
-        default_headers = {
-            "Authorization": f"Bearer {process_token}",
-            "Content-Type": "application/json",
-        }
-        logging.info("Process API route prefix: %s", route_prefix)
-        self._process_requests = Requests(route_prefix, default_headers=default_headers)
-
-    def _pop_item(self):
-        # Get the next input work item from the cloud queue.
-        url = url_join(
-            "runs",
-            self._process_run_id,
-            "robotRuns",
-            self._step_run_id,
-            "reserve-next-work-item",
-        )
-        logging.info("Reserving new input work item from: %s", url)
-        response = self._process_requests.post(url)
-        return response.json()["workItemId"]
-
-    def reserve_input(self) -> str:
-        if self._initial_item_id:
-            item_id = self._initial_item_id
-            self._initial_item_id = None
-            return item_id
-
-        item_id = self._pop_item()
-        if not item_id:
-            raise EmptyQueue("No work items in the input queue")
-        return item_id
-
-    def release_input(
-        self, item_id: str, state: State, exception: Optional[dict] = None
-    ):
-        # Release the current input work item in the cloud queue.
-        url = url_join(
-            "runs",
-            self._process_run_id,
-            "robotRuns",
-            self._step_run_id,
-            "release-work-item",
-        )
-        body = {"workItemId": item_id, "state": state.value}
-        if exception:
-            for key, value in list(exception.items()):
-                # All values are (and should be) strings (if not `None`).
-                value = value.strip() if value else value
-                if value:
-                    exception[key] = value  # keep the stripped string value
-                else:
-                    # Exclude `None` & empty string values.
-                    del exception[key]
-            body["exception"] = exception
-
-        log_func = logging.error if state == State.FAILED else logging.info
-        log_func(
-            "Releasing %s input work item %r into %r with exception: %s",
-            state.value,
-            item_id,
-            url,
-            exception,
-        )
-        self._process_requests.post(url, json=body)
-
-    def create_output(self, parent_id: str, payload: Optional[JSONType] = None) -> str:
-        # Putting "output" for the current input work item identified by `parent_id`.
-        url = url_join("work-items", parent_id, "output")
-        body = {"payload": payload}
-
-        logging.info("Creating output item: %s", url)
-        response = self._process_requests.post(url, json=body)
-        return response.json()["id"]
-
-    def load_payload(self, item_id: str) -> JSONType:
-        url = url_join(item_id, "data")
-
-        def handle_error(resp):
-            # NOTE: The API might return 404 if no payload is attached to the work
-            # item.
-            if not (resp.ok or resp.status_code == 404):
-                self._workitem_requests.handle_error(resp)
-
-        logging.info("Loading work item payload from: %s", url)
-        response = self._workitem_requests.get(url, _handle_error=handle_error)
-        return response.json() if response.ok else {}
-
-    def save_payload(self, item_id: str, payload: JSONType):
-        url = url_join(item_id, "data")
-
-        logging.info("Saving work item payload to: %s", url)
-        self._workitem_requests.put(url, json=payload)
-
-    def list_files(self, item_id: str) -> List[str]:
-        url = url_join(item_id, "files")
-
-        logging.info("Listing work item files at: %s", url)
-        response = self._workitem_requests.get(url)
-
-        return [item["fileName"] for item in response.json()]
-
-    def get_file(self, item_id: str, name: str) -> bytes:
-        # Robocorp API returns URL for S3 download.
-        file_id = self.file_id(item_id, name)
-        url = url_join(item_id, "files", file_id)
-
-        logging.info("Downloading work item file at: %s", url)
-        response = self._workitem_requests.get(url)
-        file_url = response.json()["url"]
-
-        # Perform the actual file download.
-        response = self._workitem_requests.get(
-            file_url,
-            _handle_error=lambda resp: resp.raise_for_status(),
-            _sensitive=True,
-            headers={},
-        )
-        return response.content
-
-    def add_file(self, item_id: str, name: str, *, original_name: str, content: bytes):
-        # Note that here the `original_name` is useless here. (used with `FileAdapter`
-        #   only)
-        del original_name
-
-        # Robocorp API returns pre-signed POST details for S3 upload.
-        url = url_join(item_id, "files")
-        body = {"fileName": str(name), "fileSize": len(content)}
-        logging.info(
-            "Adding work item file into: %s (name: %s, size: %d)",
-            url,
-            body["fileName"],
-            body["fileSize"],
-        )
-        response = self._workitem_requests.post(url, json=body)
-        data = response.json()
-
-        # Perform the actual file upload.
-        url = data["url"]
-        fields = data["fields"]
-        files = {"file": (name, content)}
-        self._workitem_requests.post(
-            url,
-            _handle_error=lambda resp: resp.raise_for_status(),
-            _sensitive=True,
-            headers={},
-            data=fields,
-            files=files,
-        )
-
-    def remove_file(self, item_id: str, name: str):
-        file_id = self.file_id(item_id, name)
-        url = url_join(item_id, "files", file_id)
-        self._workitem_requests.delete(url)
-
-    def file_id(self, item_id: str, name: str) -> str:
-        url = url_join(item_id, "files")
-        response = self._workitem_requests.get(url)
-
-        files = response.json()
-        if not files:
-            raise FileNotFoundError("No files in work item")
-
-        matches = [item for item in files if item["fileName"] == name]
-        if not matches:
-            raise FileNotFoundError(
-                "File with name '{name}' not in: {names}".format(
-                    name=name, names=", ".join(item["fileName"] for item in files)
-                )
-            )
-
-        # Duplicate filenames should never exist,
-        # but use last item just in case
-        return matches[-1]["fileId"]
 
 
 class FileAdapter(BaseAdapter):
@@ -372,7 +123,7 @@ class FileAdapter(BaseAdapter):
     * RPA_OUTPUT_WORKITEM_PATH:  Path to work items output database file
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         self._input_path = UNDEFINED
@@ -403,8 +154,8 @@ class FileAdapter(BaseAdapter):
             self.index += 1
 
     def release_input(
-        self, item_id: str, state: State, exception: Optional[dict] = None
-    ):
+        self, item_id: str, state: State, exception: Optional[Dict[Any, Any]] = None
+    ) -> None:
         # Nothing happens for now on releasing local dev input Work Items.
         log_func = logging.error if state == State.FAILED else logging.info
         log_func(
@@ -434,6 +185,7 @@ class FileAdapter(BaseAdapter):
                 # list with one empty initial input.
                 self._input_path = None
 
+        assert self._input_path is None or isinstance(self._input_path, Path)
         return self._input_path
 
     @property
@@ -457,6 +209,7 @@ class FileAdapter(BaseAdapter):
                     )
                 self._output_path = self.input_path.with_suffix(".output.json")
 
+        assert isinstance(self._output_path, Path)
         return self._output_path
 
     def _save_to_disk(self, source: str) -> None:
@@ -485,11 +238,11 @@ class FileAdapter(BaseAdapter):
         self._save_to_disk("output")
         return str(len(self.inputs) + len(self.outputs) - 1)  # new output work item ID
 
-    def load_payload(self, item_id: str) -> JSONType:
+    def load_payload(self, item_id: str) -> Any:
         _, item = self._get_item(item_id)
         return item.get("payload", {})
 
-    def save_payload(self, item_id: str, payload: JSONType):
+    def save_payload(self, item_id: str, payload: JSONType) -> None:
         source, item = self._get_item(item_id)
         item["payload"] = payload
         self._save_to_disk(source)
@@ -505,6 +258,7 @@ class FileAdapter(BaseAdapter):
 
         path = files[name]
         if not Path(path).is_absolute():
+            assert self.input_path
             parent = (
                 self.input_path.parent if source == "input" else self.output_path.parent
             )
@@ -513,10 +267,13 @@ class FileAdapter(BaseAdapter):
         with open(path, "rb") as infile:
             return infile.read()
 
-    def add_file(self, item_id: str, name: str, *, original_name: str, content: bytes):
+    def add_file(
+        self, item_id: str, name: str, *, original_name: str, content: bytes
+    ) -> None:
         source, item = self._get_item(item_id)
         files = item.setdefault("files", {})
 
+        assert self.input_path
         parent = (
             self.input_path.parent if source == "input" else self.output_path.parent
         )
@@ -528,7 +285,7 @@ class FileAdapter(BaseAdapter):
 
         self._save_to_disk(source)
 
-    def remove_file(self, item_id: str, name: str):
+    def remove_file(self, item_id: str, name: str) -> None:
         source, item = self._get_item(item_id)
         files = item.get("files", {})
 
@@ -539,10 +296,10 @@ class FileAdapter(BaseAdapter):
 
         self._save_to_disk(source)
 
-    def load_database(self) -> List:
+    def load_database(self) -> List[Dict[Any, Any]]:
         try:
             try:
-                with open(self.input_path, "r", encoding=ENCODING) as infile:
+                with open(f"{self.input_path}", "r", encoding=ENCODING) as infile:
                     data = json.load(infile)
             except (TypeError, FileNotFoundError):
                 logging.warning("No input work items file found: %s", self.input_path)
@@ -575,7 +332,12 @@ class WorkItem:
     :param parent_id: Parent work item's ID (optional)
     """
 
-    def __init__(self, adapter, item_id=None, parent_id=None):
+    def __init__(
+        self,
+        adapter: BaseAdapter,
+        item_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+    ):
         #: Adapter for loading/saving content
         self.adapter = adapter
         #: This item's and/or parent's ID
@@ -592,15 +354,15 @@ class WorkItem:
         self._files_to_add: Dict[str, Path] = {}
         self._files_to_remove: List[str] = []
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         payload = truncate(str(self.payload), 64)
         files = len(self.files)
         return f"WorkItem(id={self.id}, payload={payload}, files={files})"
 
     @property
-    def is_dirty(self):
+    def is_dirty(self) -> bool:
         """Check if work item has unsaved changes."""
-        return (
+        return bool(
             self.id is None
             or not is_json_equal(self._payload, self._payload_cache)
             or self._files_to_add
@@ -608,15 +370,15 @@ class WorkItem:
         )
 
     @property
-    def payload(self):
+    def payload(self) -> JSONType:
         return self._payload_cache
 
     @payload.setter
-    def payload(self, value):
+    def payload(self, value: Any) -> None:
         self._payload_cache = value
 
     @property
-    def files(self):
+    def files(self) -> List[str]:
         """List of filenames, including local files pending upload and
         excluding files pending removal.
         """
@@ -624,8 +386,9 @@ class WorkItem:
         current.extend(self._files_to_add)
         return list(sorted(set(current)))
 
-    def load(self):
+    def load(self) -> None:
         """Load data payload and list of files."""
+        assert self.id
         self._payload = self.adapter.load_payload(self.id)
         self._payload_cache = copy.deepcopy(self._payload)
 
@@ -633,9 +396,10 @@ class WorkItem:
         self._files_to_add = {}
         self._files_to_remove = []
 
-    def save(self):
+    def save(self) -> None:
         """Save data payload and attach/remove files."""
         if self.id is None:
+            assert self.parent_id, "Parent work item not saved yet"
             self.id = self.adapter.create_output(self.parent_id, payload=self.payload)
         else:
             self.adapter.save_payload(self.id, self.payload)
@@ -657,7 +421,7 @@ class WorkItem:
         self._files_to_add = {}
         self._files_to_remove = []
 
-    def get_file(self, name, path=None) -> str:
+    def get_file(self, name: str, path: Optional[str] = None) -> str:
         """Load an attached file and store it on the local filesystem.
 
         :param name: Name of attached file
@@ -676,6 +440,7 @@ class WorkItem:
             if Path(local_path).resolve() != Path(path).resolve():
                 copy2(local_path, path)
         else:
+            assert self.id, "Work item not saved yet"
             content = self.adapter.get_file(self.id, name)
             with open(path, "wb") as outfile:
                 outfile.write(content)
@@ -683,7 +448,7 @@ class WorkItem:
         # Always return absolute path
         return str(Path(path).resolve())
 
-    def add_file(self, path, name=None):
+    def add_file(self, path: Union[Path, str], name: Optional[str] = None) -> str:
         """Add file to current work item. Does not upload
         until ``save()`` is called.
 
@@ -707,7 +472,7 @@ class WorkItem:
 
         return name
 
-    def remove_file(self, name, missing_ok=True):
+    def remove_file(self, name: str, missing_ok: bool = True) -> str:
         """Remove file from current work item. Change is not applied
         until ``save()`` is called.
 
@@ -754,24 +519,6 @@ class WorkItems:
     After an input has been loaded its payload and files can be accessed
     through corresponding keywords, and optionally these values can be modified.
 
-    **E-mail triggering**
-
-    Since a process can be started in Control Room by sending an e-mail, a body
-    in Text/JSON/YAML/HTML format can be sent as well and this gets attached to the
-    input work item with the ``rawEmail`` payload variable. This library automatically
-    parses the content of it and saves into ``parsedEmail`` the dictionary
-    transformation of the original e-mail.
-
-    If "Parse email" Control Room configuration option is enabled (recommended), then
-    your e-mail is automatically parsed in the work item under the ``email`` payload
-    variable, which is a dictionary containing a ``body`` holding the final parsed form
-    of the interpreted e-mail body. The payload variable ``parsedEmail`` is still
-    available for backwards compatibility reasons and holds the very same body inside
-    the ``parsedEmail[Body]``.
-
-    E-mail attachments will be added into the work item as files. Read more on:
-    https://robocorp.com/docs/control-room/attended-or-unattended/email-trigger
-
     Example:
 
     After starting the process by sending an e-mail with a body like:
@@ -781,25 +528,6 @@ class WorkItems:
         {
             "message": "Hello world!"
         }
-
-    The robot can use the parsed e-mail body's dictionary:
-
-    .. code-block:: robotframework
-
-        *** Tasks ***
-        Using Parsed Emails
-            ${mail} =    Get Work Item Variable    email
-            Set Work Item Variables    &{mail}[body]
-            ${message} =     Get Work Item Variable     message
-            Log    ${message}    # will print "Hello world!"
-
-    The behaviour can be disabled by loading the library with
-    ``auto_parse_email=${None}`` or altered by providing to it a dictionary with one
-    "key: value" where the key is usually "email.text" (deprecated "rawEmail", the
-    variable set by Control Room, which acts as source for the parsed (deprecated raw)
-    e-mail data) and the value can be "email.body" (deprecated "parsedEmail", where the
-    parsed e-mail data gets stored into), value which can be customized and retrieved
-    with ``Get Work Item Variable``.
 
     **Creating outputs**
 
@@ -927,18 +655,11 @@ class WorkItems:
     ROBOT_LIBRARY_DOC_FORMAT = "REST"
     ROBOT_LISTENER_API_VERSION = 2
 
-    EMAIL_BODY_LOADERS = [
-        ("JSON", json.loads),
-        ("YAML", yaml.full_load),
-    ]
-
     def __init__(
         self,
         autoload: bool = True,
         root: Optional[str] = None,
-        default_adapter: Union[Type[BaseAdapter], str] = RobocorpAdapter,
-        # pylint: disable=dangerous-default-value
-        auto_parse_email: AUTO_PARSE_EMAIL_TYPE = AUTO_PARSE_EMAIL_DEFAULT,
+        default_adapter: Union[Type[BaseAdapter], str] = FileAdapter,
     ):
         self.ROBOT_LIBRARY_LISTENER = self
 
@@ -953,16 +674,15 @@ class WorkItems:
         #: Auto-load first input item and automatically parse e-mail content if
         # present.
         self.autoload: bool = autoload
-        self._auto_parse_email = auto_parse_email
         #: Adapter for reading/writing items
-        self._adapter_class = self._load_adapter(default_adapter)
+        self._adapter_class = self._load_adapter(default_adapter)  # type: ignore
         self._adapter: Optional[BaseAdapter] = None
 
         # Know when we're iterating (and consuming) all the work items in the queue.
         self._under_iteration = Event()
 
     @property
-    def adapter(self):
+    def adapter(self) -> BaseAdapter:
         if self._adapter is None:
             self._adapter = self._adapter_class()
         return self._adapter
@@ -975,7 +695,7 @@ class WorkItems:
         return self._current
 
     @current.setter
-    def current(self, value):
+    def current(self, value: Any) -> None:
         if not isinstance(value, WorkItem):
             raise ValueError(f"Not a work item: {value}")
 
@@ -989,7 +709,7 @@ class WorkItems:
             return self.inputs[-1]
         return None
 
-    def _load_adapter(self, default) -> Type[BaseAdapter]:
+    def _load_adapter(self, default: type[BaseAdapter]) -> Type[BaseAdapter]:
         """Load adapter by name, using env or given default."""
         adapter = required_env("RPA_WORKITEMS_ADAPTER", default)
 
@@ -997,103 +717,12 @@ class WorkItems:
             adapter = import_by_name(adapter, __name__)
 
         assert issubclass(
-            adapter, BaseAdapter
+            adapter, BaseAdapter  # type: ignore
         ), "Adapter does not inherit from BaseAdapter"
 
-        return adapter
+        return adapter  # type: ignore
 
-    @classmethod
-    def _interpret_content(cls, body: str) -> Union[dict, str]:
-        for name, loader in cls.EMAIL_BODY_LOADERS:
-            try:
-                body = loader(body)
-            except Exception as exc:  # pylint: disable=broad-except
-                logging.debug(
-                    "Failed deserializing input e-mail body content with loader %r "
-                    "due to: %s",
-                    name,
-                    exc,
-                )
-            else:
-                break
-
-        return body
-
-    def _get_email_content(
-        self, variables: Dict
-    ) -> Optional[Tuple[str, bool, Tuple[str]]]:
-        # Returns the extracted e-mail [parsed] content and its payload destination.
-        to_tuple = (
-            lambda keys: (  # noqa: E731, pylint: disable=unnecessary-lambda-assignment
-                keys if isinstance(keys, tuple) else (keys,)
-            )
-        )
-        file_list = self.list_work_item_files()
-        for input_keys, output_keys in self._auto_parse_email.items():
-            input_keys = to_tuple(input_keys)
-            for input_key in input_keys:
-                try:
-                    content = get_dot_value(variables, input_key)
-                except AttributeError:
-                    content = None  # couldn't reach final destination
-                if not content and input_key in file_list:
-                    path = Path(self.get_work_item_file(input_key))
-                    content = path.read_text(encoding=ENCODING)
-                    path.unlink()
-                if content:
-                    parsed = not input_key == "rawEmail"
-                    if not parsed:
-                        deprecation(
-                            "Legacy non-parsed e-mail trigger detected! Please enable "
-                            '"Parse email" configuration option in Control Room. (more'
-                            " details: https://robocorp.com/docs/control-room/attended"
-                            "-or-unattended/email-trigger#parse-email)"
-                        )
-                    output_keys = to_tuple(output_keys)
-                    return content, parsed, output_keys
-        return None
-
-    def _parse_work_item_from_email(self):
-        # Parse and return a dictionary from the input work item of a process started
-        #  by e-mail trigger.
-        if not self._auto_parse_email:
-            return  # auto e-mail parsing disabled
-
-        try:
-            variables = self.get_work_item_variables()
-        except ValueError:
-            return  # payload not a dictionary
-
-        content_details = self._get_email_content(variables)
-        if not content_details:
-            return  # no e-mail content found in the work item
-
-        content, parsed, output_keys = content_details
-        if parsed:  # With "Parse email" Control Room configuration option enabled.
-            email_data = self._interpret_content(content)
-        else:  # With "Parse email" Control Room configuration option disabled.
-            # pylint: disable=no-member
-            message = email.message_from_string(content)
-            message_dict = dict(message.items())
-            # pylint: disable=import-outside-toplevel
-            from RPA.Email.ImapSmtp import ImapSmtp
-
-            body, has_attachments = ImapSmtp().get_decoded_email_body(message)
-            message_dict["Body"] = self._interpret_content(body)
-            message_dict["Has-Attachments"] = has_attachments
-            email_data = message_dict
-
-        for output_key in output_keys:
-            keys = output_key.split(".", 1)
-            parsed_email = self.get_work_item_variable(keys[0], default={})
-            if len(keys) == 2:
-                set_dot_value(parsed_email, keys[1], value=email_data)
-            else:
-                parsed_email = email_data
-            # pylint: disable=undefined-loop-variable
-            self.set_work_item_variable(keys[0], parsed_email)
-
-    def _start_suite(self, *_):
+    def _start_suite(self, *_: Any) -> None:
         """Robot Framework listener method, called when suite starts."""
         if not self.autoload:
             return
@@ -1106,7 +735,7 @@ class WorkItems:
         finally:
             self.autoload = False
 
-    def _release_on_failure(self, attributes):
+    def _release_on_failure(self, attributes: Dict[str, Any]) -> None:
         """Automatically releases current input Work Item when encountering failures
         with tasks and/or suites.
         """
@@ -1122,7 +751,7 @@ class WorkItems:
             _internal_release=True,
         )
 
-    def _end_suite(self, _, attributes):
+    def _end_suite(self, _: str, attributes: Dict[str, Any]) -> None:
         """Robot Framework listener method, called when the suite ends."""
         # pylint: disable=unused-argument
         for item in self.inputs + self.outputs:
@@ -1131,12 +760,12 @@ class WorkItems:
 
         self._release_on_failure(attributes)
 
-    def _end_test(self, _, attributes):
+    def _end_test(self, _: str, attributes: Dict[str, Any]) -> None:
         """Robot Framework listener method, called when each task ends."""
         self._release_on_failure(attributes)
 
     @keyword
-    def set_current_work_item(self, item: WorkItem):
+    def set_current_work_item(self, item: WorkItem) -> None:
         # pylint: disable=anomalous-backslash-in-string
         """Set the currently active work item.
 
@@ -1196,16 +825,12 @@ class WorkItems:
         self.inputs.append(item)
         self.current = item
 
-        # Checks for raw/parsed e-mail content and parses it if present. This happens
-        # with Processes triggered by e-mail.
-        self._parse_work_item_from_email()
-
         return self.current
 
     @keyword
     def create_output_work_item(
         self,
-        variables: Optional[dict] = None,
+        variables: Optional[Dict[str, Any]] = None,
         files: Optional[Union[str, List[str]]] = None,
         save: bool = False,
     ) -> WorkItem:
@@ -1270,6 +895,7 @@ class WorkItems:
             )
 
         parent = self.active_input
+        assert parent
         if parent.state is not None:
             raise RuntimeError(
                 "Can't create any more output work items since the last input was "
@@ -1294,14 +920,14 @@ class WorkItems:
         return self.current
 
     @keyword
-    def save_work_item(self):
+    def save_work_item(self) -> None:
         """Save the current data and files in the work item. If not saved,
         all changes are discarded when the library goes out of scope.
         """
         self.current.save()
 
     @keyword
-    def clear_work_item(self):
+    def clear_work_item(self) -> None:
         """Remove all data and files in the current work item.
 
         Example:
@@ -1322,11 +948,12 @@ class WorkItems:
             wi.clear_work_item()
             wi.save_work_item()
         """
+        assert isinstance(self.current.payload, dict)
         self.current.payload.clear()
         self.remove_work_item_files("*")
 
     @keyword
-    def get_work_item_payload(self):
+    def get_work_item_payload(self) -> JSONType:
         """Get the full JSON payload for a work item.
 
         **NOTE**: Most use cases should prefer higher-level keywords.
@@ -1343,7 +970,7 @@ class WorkItems:
         return self.current.payload
 
     @keyword
-    def set_work_item_payload(self, payload):
+    def set_work_item_payload(self, payload: JSONType) -> None:
         # pylint: disable=anomalous-backslash-in-string
         """Set the full JSON payload for a work item.
 
@@ -1368,7 +995,7 @@ class WorkItems:
         self.current.payload = payload
 
     @keyword
-    def list_work_item_variables(self):
+    def list_work_item_variables(self) -> List[str]:
         """List the variable names for the current work item.
 
         Example:
@@ -1384,7 +1011,7 @@ class WorkItems:
         return list(self.get_work_item_variables().keys())
 
     @keyword
-    def get_work_item_variable(self, name, default=UNDEFINED):
+    def get_work_item_variable(self, name: str, default: Any = UNDEFINED) -> Any:
         """Return a single variable value from the work item,
         or default value if defined and key does not exist.
 
@@ -1418,11 +1045,10 @@ class WorkItems:
         if value is UNDEFINED:
             raise KeyError(f"Undefined variable: {name}")
 
-        notebook_print(text=f"**{name}** = **{value}**")
         return value
 
     @keyword
-    def get_work_item_variables(self):
+    def get_work_item_variables(self) -> Dict[Any, Any]:
         """Read all variables from the current work item and
         return their names and values as a dictionary.
 
@@ -1452,12 +1078,13 @@ class WorkItems:
             )
 
         if self.root is not None:
-            return payload.setdefault(self.root, {})
+            payload = payload.setdefault(self.root, {})
+            assert isinstance(payload, dict)
 
         return payload
 
     @keyword
-    def set_work_item_variable(self, name, value):
+    def set_work_item_variable(self, name: str, value: Any) -> None:
         """Set a single variable value in the current work item.
 
         :param name: Name of variable
@@ -1488,7 +1115,7 @@ class WorkItems:
         variables[name] = value
 
     @keyword
-    def set_work_item_variables(self, **kwargs):
+    def set_work_item_variables(self, **kwargs: Any) -> None:
         """Set multiple variables in the current work item.
 
         :param kwargs: Pairs of variable names and values
@@ -1508,7 +1135,7 @@ class WorkItems:
             variables[name] = value
 
     @keyword
-    def delete_work_item_variables(self, *names, force=True):
+    def delete_work_item_variables(self, *names: str, force: bool = True) -> None:
         """Delete variable(s) from the current work item.
 
         :param names: Names of variables to remove
@@ -1532,7 +1159,7 @@ class WorkItems:
                 raise KeyError(f"No such variable: {name}")
 
     @keyword
-    def set_task_variables_from_work_item(self):
+    def set_task_variables_from_work_item(self) -> None:
         """Convert all variables in the current work item to
         Robot Framework task variables, see `variable scopes`_.
 
@@ -1553,7 +1180,7 @@ class WorkItems:
             BuiltIn().set_task_variable(f"${{{name}}}", value)
 
     @keyword
-    def list_work_item_files(self):
+    def list_work_item_files(self) -> List[str]:
         """List the names of files attached to the current work item.
 
         Example:
@@ -1565,10 +1192,10 @@ class WorkItems:
                 ${names}=    List work item files
                 Log    Work item has files with names: ${names}
         """
-        return self.current.files
+        return [f"{path}" for path in self.current.files]
 
     @keyword
-    def get_work_item_file(self, name, path=None) -> str:
+    def get_work_item_file(self, name: str, path: Optional[str] = None) -> str:
         """Get attached file from work item to disk.
         Returns the absolute path to the created file.
 
@@ -1587,10 +1214,10 @@ class WorkItems:
         """
         path = self.current.get_file(name, path)
         logging.info("Downloaded file to: %s", path)
-        return path
+        return f"{path}"
 
     @keyword
-    def add_work_item_file(self, path, name=None):
+    def add_work_item_file(self, path: str, name: Optional[str] = None) -> str:
         """Add given file to work item.
 
         :param path: Path to file on disk
@@ -1612,7 +1239,7 @@ class WorkItems:
         return self.current.add_file(path, name=name)
 
     @keyword
-    def remove_work_item_file(self, name, missing_ok=True):
+    def remove_work_item_file(self, name: str, missing_ok: bool = True) -> str:
         """Remove attached file from work item.
 
         :param name: Name of attached file
@@ -1633,7 +1260,9 @@ class WorkItems:
         return self.current.remove_file(name, missing_ok)
 
     @keyword
-    def get_work_item_files(self, pattern, dirname=None) -> List[str]:
+    def get_work_item_files(
+        self, pattern: str, dirname: Optional[Union[str, Path]] = None
+    ) -> List[str]:
         """Get files attached to work item that match given pattern.
         Returns a list of absolute paths to the downloaded files.
 
@@ -1664,7 +1293,7 @@ class WorkItems:
         return paths
 
     @keyword
-    def add_work_item_files(self, pattern):
+    def add_work_item_files(self, pattern: str) -> List[Optional[Union[Path, str]]]:
         """Add all files that match given pattern to work item.
 
         :param pattern: Path wildcard pattern
@@ -1678,18 +1307,20 @@ class WorkItems:
                 Add work item files    %{ROBOT_ROOT}/generated/*.csv
                 Save Work Item
         """
-        matches = FileSystem().find_files(pattern, include_dirs=False)
+        matches = find_files(pattern, include_dirs=False)
 
-        paths = []
+        paths: List[Optional[Union[Path, str]]] = []
         for match in matches:
-            path = self.add_work_item_file(match)
+            path = self.add_work_item_file(f"{match}")
             paths.append(path)
 
         logging.info("Added %d file(s)", len(paths))
         return paths
 
     @keyword
-    def remove_work_item_files(self, pattern, missing_ok=True):
+    def remove_work_item_files(
+        self, pattern: str, missing_ok: bool = True
+    ) -> List[str]:
         """Removes files attached to work item that match the given pattern.
 
         :param pattern: Filename wildcard pattern
@@ -1734,12 +1365,14 @@ class WorkItems:
     @keyword
     def for_each_input_work_item(
         self,
-        keyword_or_func: Union[str, Callable],
-        *args,
+        keyword_or_func: Union[
+            str, Callable[[int, int, int], bool], Callable[[], Optional[int]]
+        ],
+        *args: Any,
         items_limit: int = 0,
         return_results: bool = True,
-        **kwargs,
-    ) -> List[Any]:
+        **kwargs: Any,
+    ) -> Optional[List[Any]]:
         """Run a keyword or function for each work item in the input queue.
 
         Automatically collects and returns a list of results, switch
@@ -1813,7 +1446,7 @@ class WorkItems:
                 if not input_ensured:
                     break
 
-                result = to_call()
+                result = to_call()  # type: ignore
                 if return_results:
                     results.append(result)
                 self.release_input_work_item(State.DONE, _internal_release=True)
@@ -1833,7 +1466,7 @@ class WorkItems:
         code: Optional[str] = None,
         message: Optional[str] = None,
         _internal_release: bool = False,
-    ):
+    ) -> None:
         """Release the lastly retrieved input work item and set its state.
 
         This can be released with DONE or FAILED states. With the FAILED state, an
@@ -1922,13 +1555,13 @@ class WorkItems:
         if not isinstance(state, State):
             # But since we support strings as well now, to stay compatible with Python
             #  behaviour, a "COMPLETE" value is expected instead of "DONE".
-            state: str = state.upper()
-            state: str = State.DONE.value if state == "DONE" else state
-            state: State = State(state)
+            state = state.upper()
+            state = State.DONE.value if state == "DONE" else state
+            state = State(state)
         exception = None
         if state is State.FAILED:
             if exception_type:
-                exception_type: Error = (
+                exception_type = (
                     exception_type
                     if isinstance(exception_type, Error)
                     else Error(exception_type.upper())

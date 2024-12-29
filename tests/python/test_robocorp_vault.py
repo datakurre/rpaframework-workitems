@@ -1,107 +1,89 @@
-import base64
-import binascii
-import copy
-import json
-import os
-import yaml
 from pathlib import Path
-
-import mock
+from pytest import MonkeyPatch
+from RPA.Robocorp.Vault import BaseSecretManager
+from RPA.Robocorp.Vault import FileSecrets
+from RPA.Robocorp.Vault import Secret
+from RPA.Robocorp.Vault import Vault
+from typing import Any
+from typing import Optional
+import json
 import pytest
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.serialization import load_der_public_key
 
-from RPA.Robocorp.Vault import (
-    Vault,
-    Secret,
-    RobocorpVault,
-    FileSecrets,
-    BaseSecretManager,
-    RobocorpVaultError,
-)
 
-RESOURCES = Path(__file__).parent / ".." / "resources"
+RESOURCES: Path = Path(__file__).parent / ".." / "resources"
 
 
 class InvalidBaseClass(object):
-    def get_secret(self, secret_name):
+    def get_secret(self, secret_name: str) -> bool:
         assert False, "Should not be called"
 
 
 class MockAdapter(BaseSecretManager):
     args = None
     name = None
-    value = None
+    value: Optional[Any] = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         MockAdapter.args = (args, kwargs)
 
-    def get_secret(self, secret_name):
+    def get_secret(self, secret_name: str) -> Any:
         MockAdapter.name = secret_name
         return MockAdapter.value
 
-    def set_secret(self, secret):
+    def set_secret(self, secret: Secret) -> None:
         MockAdapter.name = secret.name
         MockAdapter.value = dict(secret)
 
 
 @pytest.fixture
-def mock_env_default(monkeypatch):
+def mock_env_default(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("RPA_SECRET_MANAGER", raising=False)
 
 
 @pytest.fixture
-def mock_env_vault(monkeypatch):
+def mock_env_vault(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("RC_API_SECRET_HOST", "mock-url")
     monkeypatch.setenv("RC_API_SECRET_TOKEN", "mock-token")
     monkeypatch.setenv("RC_WORKSPACE_ID", "mock-workspace")
 
 
-@pytest.fixture(params=["secrets.json", "secrets.yaml"])
-def secrets_file(request):
+@pytest.fixture(params=["secrets.json"])
+def secrets_file(request: Any) -> Any:
     return request.param
 
 
-def test_secrets_vault_as_default(mock_env_default, mock_env_vault):
+def test_secrets_vault_as_default(
+    mock_env_default: MonkeyPatch, mock_env_vault: MonkeyPatch
+) -> None:
     library = Vault()
-    assert isinstance(library.adapter, RobocorpVault)
+    assert isinstance(library.adapter, FileSecrets)
 
 
-def test_secrets_vault_missing_token(mock_env_default, mock_env_vault, monkeypatch):
-    monkeypatch.delenv("RC_API_SECRET_TOKEN", raising=False)
-    library = Vault()
-    with pytest.raises(KeyError):
-        _ = library.adapter
-
-
-def test_secrets_custom_adapter_arguments(mock_env_default):
+def test_secrets_custom_adapter_arguments(mock_env_default: MonkeyPatch) -> None:
     library = Vault("pos-value", key="key-value", default_adapter=MockAdapter)
     library.get_secret("not-relevant")  # Adapter created on first request
     assert MockAdapter.args == (("pos-value",), {"key": "key-value"})
 
 
-def test_secrets_custom_adapter_get_secret(mock_env_default):
+def test_secrets_custom_adapter_get_secret(mock_env_default: MonkeyPatch) -> None:
     MockAdapter.value = "mock-secret"
     library = Vault(default_adapter=MockAdapter)
-    assert library.get_secret("mock-name") == "mock-secret"
+    assert library.get_secret("mock-name") == "mock-secret"  # type: ignore
     assert MockAdapter.name == "mock-name"
 
 
-def test_secrets_adapter_missing_import(monkeypatch):
+def test_secrets_adapter_missing_import(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("RPA_SECRET_MANAGER", "RPA.AdapterNotExist")
     with pytest.raises(ValueError):
         Vault()
 
 
-def test_secrets_adapter_invalid_baseclass(mock_env_default):
+def test_secrets_adapter_invalid_baseclass(mock_env_default: MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         Vault(default_adapter=InvalidBaseClass)
 
 
-def test_secret_properties():
+def test_secret_properties() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -112,7 +94,7 @@ def test_secret_properties():
     assert secret.description == "description-value"
 
 
-def test_secret_get():
+def test_secret_get() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -125,7 +107,7 @@ def test_secret_get():
         _ = secret["key_invalid"]
 
 
-def test_secret_set():
+def test_secret_set() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -141,7 +123,7 @@ def test_secret_set():
         _ = secret["key_invalid"]
 
 
-def test_secret_update():
+def test_secret_update() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -158,7 +140,7 @@ def test_secret_update():
     assert secret == expected
 
 
-def test_secret_iterate():
+def test_secret_iterate() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -168,7 +150,7 @@ def test_secret_iterate():
     assert list(secret) == ["key_one", "key_two"]
 
 
-def test_secret_contains():
+def test_secret_contains() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -178,7 +160,7 @@ def test_secret_contains():
     assert "key_two" in secret
 
 
-def test_secret_print():
+def test_secret_print() -> None:
     secret = Secret(
         name="name-value",
         description="description-value",
@@ -194,7 +176,9 @@ def test_secret_print():
     assert "value_two" not in str_string
 
 
-def test_adapter_filesecrets_from_arg(monkeypatch, secrets_file):
+def test_adapter_filesecrets_from_arg(
+    monkeypatch: MonkeyPatch, secrets_file: Path
+) -> None:
     monkeypatch.delenv("RPA_SECRET_FILE", raising=False)
 
     adapter = FileSecrets(RESOURCES / secrets_file)
@@ -204,7 +188,9 @@ def test_adapter_filesecrets_from_arg(monkeypatch, secrets_file):
     assert secret["password"] == "secret"
 
 
-def test_adapter_filesecrets_from_env(monkeypatch, secrets_file):
+def test_adapter_filesecrets_from_env(
+    monkeypatch: MonkeyPatch, secrets_file: Path
+) -> None:
     monkeypatch.setenv("RPA_SECRET_FILE", str(RESOURCES / secrets_file))
 
     adapter = FileSecrets()
@@ -214,7 +200,7 @@ def test_adapter_filesecrets_from_env(monkeypatch, secrets_file):
     assert secret["password"] == "secret"
 
 
-def test_adapter_filesecrets_invalid_file(monkeypatch):
+def test_adapter_filesecrets_invalid_file(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("RPA_SECRET_FILE", str(RESOURCES / "not-a-file.json"))
 
     # Should not raise
@@ -222,9 +208,9 @@ def test_adapter_filesecrets_invalid_file(monkeypatch):
     assert adapter.data == {}
 
 
-def test_adapter_filesecrets_invalid_file_extension(monkeypatch):
-    # Note the invalid ".yamla" extension not recognized by the serializers.
-    monkeypatch.setenv("RPA_SECRET_FILE", str(RESOURCES / "secrets.yamla"))
+def test_adapter_filesecrets_invalid_file_extension(monkeypatch: MonkeyPatch) -> None:
+    # Note the invalid ".foo" extension not recognized by the serializers.
+    monkeypatch.setenv("RPA_SECRET_FILE", str(RESOURCES / "secrets.foo"))
 
     # Should raise immediately, because this is invalid straight from the
     # configuration. Only certain extensions (formats) are accepted.
@@ -232,7 +218,9 @@ def test_adapter_filesecrets_invalid_file_extension(monkeypatch):
         FileSecrets()
 
 
-def test_adapter_filesecrets_unknown_secret(monkeypatch, secrets_file):
+def test_adapter_filesecrets_unknown_secret(
+    monkeypatch: MonkeyPatch, secrets_file: Path
+) -> None:
     monkeypatch.setenv("RPA_SECRET_FILE", str(RESOURCES / secrets_file))
 
     adapter = FileSecrets()
@@ -240,7 +228,9 @@ def test_adapter_filesecrets_unknown_secret(monkeypatch, secrets_file):
         _ = adapter.get_secret("not-exist")
 
 
-def test_adapter_filesecrets_saving(monkeypatch, tmp_path, secrets_file):
+def test_adapter_filesecrets_saving(
+    monkeypatch: MonkeyPatch, tmp_path: Path, secrets_file: Path
+) -> None:
     tmp_file = tmp_path / secrets_file
     tmp_file.write_text((RESOURCES / secrets_file).read_text())
     monkeypatch.setenv("RPA_SECRET_FILE", str(tmp_file))
@@ -251,96 +241,6 @@ def test_adapter_filesecrets_saving(monkeypatch, tmp_path, secrets_file):
     adapter.set_secret(secret)
     adapter.save()
 
-    assert tmp_file.suffix in (".json", ".yaml")
-    if tmp_file.suffix == ".json":
-        loader = json.load
-    else:
-        loader = yaml.full_load
-    secret_dict = loader(tmp_file.open())
+    assert tmp_file.suffix in (".json")
+    secret_dict = json.load(tmp_file.open())
     assert secret_dict["credentials"]["sap"]["password"] == "my-different-secret"
-
-
-@mock.patch("RPA.Robocorp.Vault.requests")
-def test_adapter_vault_request(mock_requests, mock_env_default, mock_env_vault):
-    mock_requests.get.return_value.json.return_value = {
-        "name": "mock-name",
-        "description": "mock-desc",
-        "value": {"mock-key": "mock-value"},
-        "encryption": {},
-    }
-
-    def mock_decrypt(payload):
-        # Decrypt tested separately
-        payload = copy.deepcopy(payload)
-        payload["values"] = payload.pop("value")
-        return payload
-
-    adapter = RobocorpVault()
-    adapter._decrypt_payload = mock_decrypt
-
-    secret = adapter.get_secret("mock-name")
-    assert secret.name == "mock-name"
-    assert secret.description == "mock-desc"
-    assert secret["mock-key"] == "mock-value"
-
-    mock_requests.get.assert_called_once_with(
-        "mock-url/secrets-v1/workspaces/mock-workspace/secrets/mock-name",
-        headers={"Authorization": "Bearer mock-token"},
-        params={
-            "encryptionScheme": "robocloud-vault-transit-v2",
-            "publicKey": adapter._public_bytes,
-        },
-    )
-
-
-@mock.patch("RPA.Robocorp.Vault.requests")
-def test_adapter_vault_error(mock_requests, mock_env_vault):
-    mock_requests.get.side_effect = RuntimeError("Some request error")
-
-    adapter = RobocorpVault()
-    with pytest.raises(RobocorpVaultError):
-        adapter.get_secret("mock-name")
-
-
-def test_adapter_vault_encryption(mock_env_vault):
-    data = json.dumps({"mock-key": "mock-value"}).encode("utf-8")
-
-    # Cloud encrypts secret with symmetric encryption
-    key = AESGCM.generate_key(bit_length=128)
-    aesgcm = AESGCM(key)
-    nonce = os.urandom(12)
-    ct_data = aesgcm.encrypt(binascii.hexlify(nonce), data, b"")
-
-    # Cloud uses client-supplied public key to encrypt symmetric key
-    adapter = RobocorpVault()
-    public_key = load_der_public_key(
-        base64.b64decode(adapter._public_bytes), default_backend()
-    )
-
-    ct_key = public_key.encrypt(
-        key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
-
-    ct_data, auth_tag = ct_data[:-16], ct_data[-16:]
-
-    # Binary fields are base64 encoded, except nonce/iv (will possibly change)
-    payload = {
-        "name": "mock-name",
-        "description": "mock-desc",
-        "value": base64.b64encode(ct_data).decode("utf-8"),
-        "encryption": {
-            "encryptionScheme": adapter.ENCRYPTION_SCHEME,
-            "encryptedAES": base64.b64encode(ct_key).decode("utf-8"),
-            "authTag": base64.b64encode(auth_tag).decode("utf-8"),
-            "iv": base64.b64encode(nonce).decode("utf-8"),
-        },
-    }
-
-    response = adapter._decrypt_payload(payload)
-    assert response["name"] == "mock-name"
-    assert response["values"]["mock-key"] == "mock-value"

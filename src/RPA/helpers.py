@@ -1,19 +1,21 @@
-import importlib
+from typing import Any
+from typing import Dict
+from typing import Optional
 import code
+import importlib
 import logging
 import os
 import string
 import sys
 import time
 import unicodedata
-from typing import Any, Optional
 
 
 # Sentinel value for undefined argument
 UNDEFINED = object()
 
 
-def delay(sleeptime: float = 0.0):
+def delay(sleeptime: float = 0.0) -> None:
     """Delay execution for given amount of seconds.
 
     :param sleeptime: seconds as float, defaults to 0
@@ -60,7 +62,7 @@ def required_env(name: str, default: Any = UNDEFINED) -> str:
     return val
 
 
-def required_param(param_name: Any = None, method_name: str = None):
+def required_param(param_name: Any = None, method_name: Optional[str] = None) -> None:
     """Check that required parameter is not None"""
     if not isinstance(param_name, list):
         param_name = [param_name]
@@ -68,7 +70,7 @@ def required_param(param_name: Any = None, method_name: str = None):
         raise KeyError("Required parameter(s) missing for kw: %s" % method_name)
 
 
-def import_by_name(name: str, caller: str = None) -> Any:
+def import_by_name(name: str, caller: Optional[str] = None) -> Any:
     """Import module (or attribute) by name.
 
     :param name: Import path, e.g. RPA.Robocorp.WorkItems.RobocorpAdapter
@@ -101,7 +103,7 @@ def import_by_name(name: str, caller: str = None) -> Any:
     raise ValueError(f"No module/attribute with name: {name}")
 
 
-def interact(expression: Any = None, local: Optional[dict] = None):
+def interact(expression: Any = None, local: Optional[Dict[Any, Any]] = None) -> None:
     """Interrupts the execution with an interactive shell on `expression`."""
     if expression is not None and not expression:
         return

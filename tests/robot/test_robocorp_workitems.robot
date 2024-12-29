@@ -1,6 +1,4 @@
 *** Settings ***
-Library        RPA.Email.ImapSmtp
-Library        RPA.FileSystem
 Library        OperatingSystem      WITH NAME   OS
 
 Task Setup     Load mock library
@@ -77,17 +75,17 @@ Create output work item with variables and files
     &{customer_vars} =    Create Dictionary    user=Another3    mail=another3@company.com
     ${test_file} =      Set Variable    ${RESULTS}${/}test.txt
     ${content} =    Set Variable    Test output work item
-    RPA.FileSystem.Create File    ${test_file}   ${content}  overwrite=${True}
+    Create File    ${test_file}   ${content}
     Create Output Work Item     variables=${customer_vars}  files=${test_file}  save=${True}
 
     ${user_value} =     Get Work Item Variable      user
     Should Be Equal     ${user_value}      Another3
 
-    ${path_out} =      Absolute Path   ${RESULTS}${/}test-out.txt
+    ${path_out} =      Normalize Path   ${RESULTS}${/}test-out.txt
     ${path} =   Get Work Item File  test.txt    path=${path_out}
     Should Be Equal    ${path}      ${path_out}
     File should exist    ${path}
-    ${obtained_content} =   Read File    ${path}
+    ${obtained_content} =   Get File    ${path}
     Should Be Equal     ${obtained_content}      ${content}
 
 
@@ -106,6 +104,9 @@ Failed release with exception
 Consume queue with and without results
     # Since the first item might be released already or not.
     Run Keyword And Ignore Error    Release Input Work Item     DONE
+    ${variables} =   Get work item variables
+    Log   ${variables}
+
 
     @{expected_results} =   Create List     ${4}    ${2}
     ${results} =     For Each Input Work Item    Log Payload    return_results=${True}      items_limit=${2}
@@ -113,26 +114,3 @@ Consume queue with and without results
 
     ${results} =     For Each Input Work Item    Log Payload    return_results=${False}
     Should Be Equal     ${results}      ${None}
-
-
-Get payload given e-mail process triggering
-    ${parsed_email} =    Get Work Item Variable    parsedEmail
-    Set Work Item Variables    &{parsed_email}[Body]
-    Save Work Item
-    ${message} =     Get Work Item Variable     message
-    Should Be Equal     ${message}      from email
-    Should Be True    ${parsed_email}[Has-Attachments]
-    ${raw_email} =    Get Work Item Variable    rawEmail
-    ${message} =    Evaluate    email.message_from_string($raw_email)     modules=email
-    Save Attachment     ${message}    ${RESULTS}    overwrite=${True}
-    ${path} =   Set Variable    ${RESULTS}${/}test.txt
-    File Should Exist   ${path}
-    ${data} =   Read File    ${path}
-    Should Be Equal     ${data}    My Cool Attachment   strip_spaces=${True}
-
-    # The newly parsed e-mail trigger option enabled.
-    Get Input Work Item
-    ${parsed_email} =   Get Work Item Variable    parsedEmail
-    Should Contain    ${parsed_email}[Body]    from email
-    ${email_parsed} =   Get Work Item Variable    email
-    Should Contain    ${email_parsed}[body]    from email

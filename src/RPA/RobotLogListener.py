@@ -1,18 +1,16 @@
+from robot.libraries.BuiltIn import BuiltIn  # type: ignore
+from robot.running.context import EXECUTION_CONTEXTS  # type: ignore
+from RPA.helpers import required_param
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 import logging
 import warnings
-from typing import Union, List
-
-try:
-    from robot.libraries.BuiltIn import BuiltIn
-    from robot.running.context import EXECUTION_CONTEXTS
-except ModuleNotFoundError:
-    BuiltIn = None
-    EXECUTION_CONTEXTS = None
-
-from RPA.core.helpers import required_param
 
 
-def deprecation(message):
+def deprecation(message: str) -> None:
     """Emits once a deprecation warning log given the provided `message`."""
     logging.captureWarnings(True)
     try:
@@ -139,21 +137,21 @@ class RobotLogListener:
     ROBOT_LIBRARY_DOC_FORMAT = "REST"
     ROBOT_LISTENER_API_VERSION = 2
 
-    KEYWORDS_TO_PROTECT = ["rpa.robocloud.secrets.", "rpa.robocorp.vault."]
-    KEYWORDS_TO_MUTE = []
-    INFO_LEVEL_KEYWORDS = []
+    KEYWORDS_TO_PROTECT = ["rpa.robocorp.vault.", "rpa.vault."]
+    KEYWORDS_TO_MUTE: List[str] = []
+    INFO_LEVEL_KEYWORDS: List[str] = []
 
     def __init__(self) -> None:
         self.ROBOT_LIBRARY_LISTENER = self
         self.logger = logging.getLogger(__name__)
-        self.stack = []
+        self.stack: List[Any] = []
 
         # Run-on-failure
-        self.muted_keyword = None
-        self.muted_optionals = []
-        self.muted_previous = {}
+        self.muted_keyword: Optional[str] = None
+        self.muted_optionals: List[Any] = []
+        self.muted_previous: Dict[str, Any] = {}
 
-    def only_info_level(self, names: Union[str, List] = None):
+    def only_info_level(self, names: Optional[Union[str, List[Any]]] = None) -> None:
         """Register keywords that are allowed only INFO level logging
 
         :param names: list of keywords to protect
@@ -163,11 +161,14 @@ class RobotLogListener:
             names = [names]
 
         for name in names:
-            normalized = self._normalize(name)
-            if normalized not in self.INFO_LEVEL_KEYWORDS:
-                self.INFO_LEVEL_KEYWORDS.append(normalized)
+            if name:
+                normalized = self._normalize(name)
+                if normalized not in self.INFO_LEVEL_KEYWORDS:
+                    self.INFO_LEVEL_KEYWORDS.append(normalized)
 
-    def register_protected_keywords(self, names: Union[str, List] = None) -> None:
+    def register_protected_keywords(
+        self, names: Optional[Union[str, List[Any]]] = None
+    ) -> None:
         """Register keywords that are not going to be logged into Robot Framework logs.
 
         :param names: list of keywords to protect
@@ -177,12 +178,15 @@ class RobotLogListener:
             names = [names]
 
         for name in names:
-            normalized = self._normalize(name)
-            if normalized not in self.KEYWORDS_TO_PROTECT:
-                self.KEYWORDS_TO_PROTECT.append(normalized)
+            if name:
+                normalized = self._normalize(name)
+                if normalized not in self.KEYWORDS_TO_PROTECT:
+                    self.KEYWORDS_TO_PROTECT.append(normalized)
 
     def mute_run_on_failure(
-        self, keywords: Union[str, List] = None, optional_keyword_to_run: str = None
+        self,
+        keywords: Optional[Union[str, List[Any]]] = None,
+        optional_keyword_to_run: Optional[str] = None,
     ) -> None:
         """Set keywords which should not execute `SeleniumLibrary`
         default behaviour of running keyword on failure.
@@ -212,9 +216,10 @@ class RobotLogListener:
             keywords = [keywords]
 
         for keyword in keywords:
-            normalized = self._normalize(keyword)
-            if normalized not in self.KEYWORDS_TO_MUTE:
-                self.KEYWORDS_TO_MUTE.append(normalized)
+            if keyword:
+                normalized = self._normalize(keyword)
+                if normalized not in self.KEYWORDS_TO_MUTE:
+                    self.KEYWORDS_TO_MUTE.append(normalized)
 
         for library in ("RPA.Browser", "RPA.Browser.Selenium"):
             status, instance = BuiltIn().run_keyword_and_ignore_error(
@@ -223,7 +228,9 @@ class RobotLogListener:
             if status == "PASS":
                 self.muted_optionals.append((instance, optional_keyword_to_run))
 
-    def start_keyword(self, name, attributes):  # pylint: disable=W0613
+    def start_keyword(
+        self, name: str, attributes: Dict[str, Any]
+    ) -> None:  # pylint: disable=W0613
         """Listener method for keyword start.
 
         :param name: keyword name
@@ -263,7 +270,9 @@ class RobotLogListener:
             self.muted_keyword = normalized
             self.muted_previous = previous
 
-    def end_keyword(self, name, attributes):  # pylint: disable=W0613
+    def end_keyword(
+        self, name: str, attributes: Dict[str, Any]
+    ) -> None:  # pylint: disable=W0613
         """Listener method for keyword end.
 
         :param name: keyword name
@@ -305,5 +314,5 @@ class RobotLogListener:
         """
         return name.lower().replace(" ", "_")
 
-    def _is_robot_running(self):
+    def _is_robot_running(self) -> bool:
         return BuiltIn is not None and EXECUTION_CONTEXTS.current is not None

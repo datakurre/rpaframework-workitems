@@ -17,6 +17,7 @@ setup.py
 .mypy_cache/
 testvars.py
 *_testvars.py
+src/RPA/__init__.py
 
 # Robot Framework
 tests/results
@@ -29,3 +30,9 @@ tests/*.xml
 
 # invoke config
 invoke.yaml
+
+# devenv
+devenv.local.nix
+.devenv.flake.nix
+.devenv/
+.pre-commit-config.yaml
